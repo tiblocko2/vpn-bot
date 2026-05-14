@@ -97,6 +97,12 @@ func ClientExists(comment string) bool {
 	return err == nil && count > 0
 }
 
+func ClientExistsBySubscription(subscription string) bool {
+	var count int
+	err := conn.QueryRow("SELECT COUNT(*) FROM clients WHERE subscription = ?", subscription).Scan(&count)
+	return err == nil && count > 0
+}
+
 func SaveClient(comment, subscription, emailVless, emailVmess string) error {
 	_, err := conn.Exec(
 		"INSERT INTO clients (comment, subscription, email_vless, email_vmess) VALUES (?, ?, ?, ?)",

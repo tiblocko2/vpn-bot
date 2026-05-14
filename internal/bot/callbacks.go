@@ -67,6 +67,19 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 			b.send(userID, fmt.Sprintf("✅ Оператор %d удалён", opID))
 		}
 
+	case data == "import_panel":
+		ack("")
+		b.send(userID, "⏳ Импортирую клиентов из 3X-UI...")
+		res, err := panel.ImportClientsFromPanel()
+		if err != nil {
+			b.send(userID, "❌ Ошибка импорта: "+err.Error())
+		} else {
+			b.send(userID, fmt.Sprintf(
+				"✅ Импорт завершён:\n• Добавлено: %d\n• Уже существуют: %d\n• Только в одном inbound: %d",
+				res.Imported, res.Skipped, res.Orphaned,
+			))
+		}
+
 	case data == "change_domain":
 		if userID != config.Cfg.SuperUserID {
 			ack("❌ Нет доступа")

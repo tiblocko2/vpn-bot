@@ -232,3 +232,137 @@ func generateUUID() string {
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
+
+// --- 3X-UI import ---
+
+// ImportResult summarises one sync run from the panel.
+type ImportResult struct {
+	Imported int // new records written to bot DB
+	Skipped  int // already present in bot DB (matched by subscription/subId)
+	Orphaned int // found in only one inbound — cannot sync without both emails
+}
+
+type inboundClient struct {
+	Email   string
+	Comment string
+	SubID   string
+}
+
+func getRequest(method string) ([]byte, error) {
+	req, err := http.NewRequest("GET", config.Cfg.PanelURL+method, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP ошибка (%s): %v", method, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		return nil, fmt.Errorf("пустой ответ от панели (status: %d, метод: %s)", resp.StatusCode, method)
+	}
+	return body, nil
+}
+
+// getInboundClients fetches all clients from one inbound and returns only those
+// with a non-empty subId (clients without subId cannot be grouped).
+func getInboundClients(inboundID int64) ([]inboundClient, error) {
+	body, err := getRequest(fmt.Sprintf("/panel/api/inbounds/get/%d", inboundID))
+	if err != nil {
+		return nil, err
+	}
+
+	// 3X-UI wraps inbound data in obj.settings as an escaped JSON string
+	var envelope struct {
+		Success bool `json:"success"`
+		Obj     struct {
+			Settings string `json:"settings"`
+		} `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга inbound %d: %v", inboundID, err)
+	}
+	if !envelope.Success {
+		return nil, fmt.Errorf("API вернул ошибку для inbound %d", inboundID)
+	}
+
+	var settings struct {
+		Clients []struct {
+			Email   string `json:"email"`
+			Comment string `json:"comment"`
+			SubID   string `json:"subId"`
+		} `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(envelope.Obj.Settings), &settings); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга settings inbound %d: %v", inboundID, err)
+	}
+
+	var out []inboundClient
+	for _, c := range settings.Clients {
+		if c.SubID != "" {
+			out = append(out, inboundClient{Email: c.Email, Comment: c.Comment, SubID: c.SubID})
+		}
+	}
+	return out, nil
+}
+
+// ImportClientsFromPanel syncs clients from the two configured 3X-UI inbounds
+// into the bot database. Clients are paired by subId. Already-known clients
+// (matched by subscription) are counted as skipped, not duplicated.
+func ImportClientsFromPanel() (ImportResult, error) {
+	if err := Login(); err != nil {
+		return ImportResult{}, fmt.Errorf("ошибка авторизации: %v", err)
+	}
+
+	vlessClients, err := getInboundClients(config.Cfg.VlessInboundID)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("ошибка получения inbound %d: %v", config.Cfg.VlessInboundID, err)
+	}
+
+	vmessClients, err := getInboundClients(config.Cfg.VmessInboundID)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("ошибка получения inbound %d: %v", config.Cfg.VmessInboundID, err)
+	}
+
+	// Index VMess clients by subId for O(1) pairing
+	vmessMap := make(map[string]inboundClient, len(vmessClients))
+	for _, c := range vmessClients {
+		vmessMap[c.SubID] = c
+	}
+
+	var res ImportResult
+	for _, vless := range vlessClients {
+		vmess, paired := vmessMap[vless.SubID]
+		if !paired {
+			res.Orphaned++
+			continue
+		}
+
+		if db.ClientExistsBySubscription(vless.SubID) {
+			res.Skipped++
+			continue
+		}
+
+		// Use VLESS comment; fall back to VMess comment, then subId itself
+		comment := vless.Comment
+		if comment == "" {
+			comment = vmess.Comment
+		}
+		if comment == "" {
+			comment = vless.SubID
+		}
+
+		if err := db.SaveClient(comment, vless.SubID, vless.Email, vmess.Email); err != nil {
+			log.Printf("⚠️ Ошибка импорта клиента subId=%s: %v", vless.SubID, err)
+			continue
+		}
+		res.Imported++
+	}
+
+	return res, nil
+}

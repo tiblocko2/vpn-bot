@@ -18,6 +18,9 @@ func (b *Bot) showMenu(userID int64) {
 		{tgbotapi.NewInlineKeyboardButtonData("➖ Удалить пользователя", "del_user_list:0")},
 		{tgbotapi.NewInlineKeyboardButtonData("👥 Список клиентов", "client_list:0")},
 	}
+	btns = append(btns, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Импорт из 3X-UI", "import_panel"),
+	})
 	if userID == config.Cfg.SuperUserID {
 		btns = append(btns,
 			[]tgbotapi.InlineKeyboardButton{
