@@ -3,7 +3,6 @@ package bot
 import (
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -13,15 +12,27 @@ import (
 	"vpn-bot/internal/panel"
 )
 
+// sendOrEdit sends a new message or edits an existing one in place.
+func (b *Bot) sendOrEdit(userID int64, editMsgID int, text, parseMode string, markup tgbotapi.InlineKeyboardMarkup) {
+	if editMsgID != 0 {
+		edit := tgbotapi.NewEditMessageText(userID, editMsgID, text)
+		edit.ParseMode = parseMode
+		edit.ReplyMarkup = &markup
+		b.api.Send(edit)
+		return
+	}
+	msg := tgbotapi.NewMessage(userID, text)
+	msg.ParseMode = parseMode
+	msg.ReplyMarkup = markup
+	b.api.Send(msg)
+}
+
 func (b *Bot) showMenu(userID int64) {
 	btns := [][]tgbotapi.InlineKeyboardButton{
 		{tgbotapi.NewInlineKeyboardButtonData("➕ Добавить пользователя", "add_user")},
-		{tgbotapi.NewInlineKeyboardButtonData("➖ Удалить пользователя", "del_user_list:0")},
-		{tgbotapi.NewInlineKeyboardButtonData("👥 Список клиентов", "client_list:0")},
+		{tgbotapi.NewInlineKeyboardButtonData("👥 Список клиентов", "client_list_new")},
+		{tgbotapi.NewInlineKeyboardButtonData("🔄 Импорт из 3X-UI", "import_panel")},
 	}
-	btns = append(btns, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Импорт из 3X-UI", "import_panel"),
-	})
 	if userID == config.Cfg.SuperUserID {
 		btns = append(btns,
 			[]tgbotapi.InlineKeyboardButton{
@@ -50,9 +61,9 @@ func (b *Bot) showAddUser(userID int64) {
 	b.api.Send(msg)
 }
 
-// showDeleteList renders a paginated list of clients as delete buttons.
-// callback_data uses numeric DB id to stay within Telegram's 64-byte limit.
-func (b *Bot) showDeleteList(userID int64, page int) {
+// showClientList renders a paginated list of clients as clickable buttons.
+// editMsgID > 0 means edit an existing message in place (for pagination).
+func (b *Bot) showClientList(userID int64, page int, editMsgID int) {
 	clients, total, err := db.GetClientsPage(page)
 	if err != nil {
 		b.send(userID, "❌ Ошибка получения списка клиентов")
@@ -64,75 +75,107 @@ func (b *Bot) showDeleteList(userID int64, page int) {
 	}
 
 	totalPages := int(math.Ceil(float64(total) / float64(db.ClientsPerPage)))
-	var buttons [][]tgbotapi.InlineKeyboardButton
+	text := fmt.Sprintf("👥 Клиенты (всего: %d, стр. %d/%d):", total, page+1, totalPages)
 
+	var buttons [][]tgbotapi.InlineKeyboardButton
 	for _, c := range clients {
-		label := "🗑 " + c.Comment
+		label := c.Comment
 		if len([]rune(label)) > 50 {
 			label = string([]rune(label)[:50])
 		}
 		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("del_confirm:%d", c.ID)),
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("client_detail:%d", c.ID)),
 		})
 	}
 
 	if totalPages > 1 {
 		var nav []tgbotapi.InlineKeyboardButton
 		if page > 0 {
-			nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("del_user_list:%d", page-1)))
+			nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("client_list:%d", page-1)))
 		}
 		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", page+1, totalPages), "noop"))
 		if page < totalPages-1 {
-			nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("➡️", fmt.Sprintf("del_user_list:%d", page+1)))
+			nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("➡️", fmt.Sprintf("client_list:%d", page+1)))
 		}
 		buttons = append(buttons, nav)
 	}
 	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", "cancel"),
-	})
-
-	msg := tgbotapi.NewMessage(userID, fmt.Sprintf("🗑 Выберите пользователя для удаления (всего: %d):", total))
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	b.api.Send(msg)
-}
-
-func (b *Bot) showClientList(userID int64, page int) {
-	clients, total, err := db.GetClientsPage(page)
-	if err != nil {
-		b.send(userID, "❌ Ошибка получения списка клиентов")
-		return
-	}
-	if total == 0 {
-		b.send(userID, "📭 Список клиентов пуст")
-		return
-	}
-
-	totalPages := int(math.Ceil(float64(total) / float64(db.ClientsPerPage)))
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("👥 Клиенты (всего: %d, стр. %d/%d):\n\n", total, page+1, totalPages))
-	for i, c := range clients {
-		sb.WriteString(fmt.Sprintf("%d. %s\n", page*db.ClientsPerPage+i+1, c.Comment))
-	}
-
-	var navBtns []tgbotapi.InlineKeyboardButton
-	if page > 0 {
-		navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData("⬅️", fmt.Sprintf("client_list:%d", page-1)))
-	}
-	if page < totalPages-1 {
-		navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData("➡️", fmt.Sprintf("client_list:%d", page+1)))
-	}
-
-	var rows [][]tgbotapi.InlineKeyboardButton
-	if len(navBtns) > 0 {
-		rows = append(rows, navBtns)
-	}
-	rows = append(rows, []tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "back_to_menu"),
 	})
 
-	msg := tgbotapi.NewMessage(userID, sb.String())
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
-	b.api.Send(msg)
+	b.sendOrEdit(userID, editMsgID, text, "", tgbotapi.NewInlineKeyboardMarkup(buttons...))
+}
+
+// showClientDetail renders the detail view for a single client.
+func (b *Bot) showClientDetail(userID int64, clientID int64, editMsgID int) {
+	details, err := db.GetClientDetails(clientID)
+	if err != nil {
+		b.send(userID, "❌ Клиент не найден")
+		return
+	}
+
+	ibLabels := make(map[int64]string)
+	for _, ib := range config.Cfg.Inbounds {
+		ibLabels[ib.ID] = ib.Label
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("👤 <b>%s</b>\n\n", escapeHTML(details.Comment)))
+
+	if config.Cfg.SubDomain != "" && details.Subscription != "" {
+		sb.WriteString(fmt.Sprintf("🔗 Ссылка на подписку:\n<code>%s/%s</code>\n\n", config.Cfg.SubDomain, details.Subscription))
+	}
+
+	sb.WriteString("📡 Подключённые inbound:\n")
+	if len(details.Emails) == 0 {
+		sb.WriteString("  нет\n")
+	} else {
+		for ibID := range details.Emails {
+			label := ibLabels[ibID]
+			if label == "" {
+				label = fmt.Sprintf("ID %d", ibID)
+			}
+			sb.WriteString(fmt.Sprintf("  ✅ [%d] %s\n", ibID, escapeHTML(label)))
+		}
+	}
+
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	for _, ib := range config.Cfg.Inbounds {
+		if _, connected := details.Emails[ib.ID]; !connected {
+			label := fmt.Sprintf("➕ Добавить в [%d] %s", ib.ID, ib.Label)
+			buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+				tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("client_ib_add:%d:%d", clientID, ib.ID)),
+			})
+		}
+	}
+
+	buttons = append(buttons,
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить клиента", fmt.Sprintf("del_confirm:%d", clientID)),
+		},
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ К списку клиентов", "client_list:0"),
+		},
+	)
+
+	b.sendOrEdit(userID, editMsgID, sb.String(), "HTML", tgbotapi.NewInlineKeyboardMarkup(buttons...))
+}
+
+// showDeleteConfirm asks for confirmation before deleting a client.
+func (b *Bot) showDeleteConfirm(userID int64, clientID int64, editMsgID int) {
+	details, err := db.GetClientDetails(clientID)
+	name := "клиента"
+	if err == nil {
+		name = fmt.Sprintf("'%s'", details.Comment)
+	}
+	text := fmt.Sprintf("⚠️ Удалить пользователя %s?\nЭто действие нельзя отменить.", name)
+	buttons := tgbotapi.NewInlineKeyboardMarkup(
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("✅ Да, удалить", fmt.Sprintf("del_confirm_yes:%d", clientID)),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", fmt.Sprintf("client_detail:%d", clientID)),
+		},
+	)
+	b.sendOrEdit(userID, editMsgID, text, "", buttons)
 }
 
 func (b *Bot) showOpsManage(userID int64) {
@@ -156,8 +199,8 @@ func (b *Bot) showOpsManage(userID int64) {
 	for _, opID := range operators {
 		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
 			tgbotapi.NewInlineKeyboardButtonData(
-				"❌ "+strconv.FormatInt(opID, 10),
-				"ops_remove:"+strconv.FormatInt(opID, 10),
+				"❌ "+fmt.Sprintf("%d", opID),
+				fmt.Sprintf("ops_remove:%d", opID),
 			),
 		})
 	}
@@ -221,8 +264,6 @@ func (b *Bot) showInboundSettings(userID int64) {
 	b.api.Send(msg)
 }
 
-// showInboundPicker fetches the live inbound list from the panel and shows
-// inbounds not yet configured, so the user can add one.
 func (b *Bot) showInboundPicker(userID int64) {
 	b.send(userID, "⏳ Загружаю список inbound из панели...")
 
@@ -269,8 +310,6 @@ func (b *Bot) showInboundPicker(userID int64) {
 	b.api.Send(msg)
 }
 
-// showImportSelection renders a checklist of configured inbounds for the user
-// to select which ones to import from.
 func (b *Bot) showImportSelection(userID int64) {
 	inbounds := config.Cfg.Inbounds
 	if len(inbounds) == 0 {
@@ -335,4 +374,11 @@ func (b *Bot) showChangeDomain(userID int64) {
 		[]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", "cancel")},
 	)
 	b.api.Send(msg)
+}
+
+func escapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }

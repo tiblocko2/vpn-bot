@@ -24,31 +24,68 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 
 	ack := func(text string) { b.api.Request(tgbotapi.NewCallback(cb.ID, text)) }
 	data := cb.Data
+	msgID := cb.Message.MessageID
 
 	switch {
 	case data == "add_user":
 		ack("")
 		b.showAddUser(userID)
 
-	case strings.HasPrefix(data, "del_user_list:"):
+	// --- client list ---
+
+	case data == "client_list_new":
 		ack("")
-		page, _ := strconv.Atoi(strings.TrimPrefix(data, "del_user_list:"))
-		b.showDeleteList(userID, page)
+		b.showClientList(userID, 0, 0)
 
 	case strings.HasPrefix(data, "client_list:"):
 		ack("")
 		page, _ := strconv.Atoi(strings.TrimPrefix(data, "client_list:"))
-		b.showClientList(userID, page)
+		b.showClientList(userID, page, msgID)
+
+	case strings.HasPrefix(data, "client_detail:"):
+		ack("")
+		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "client_detail:"), 10, 64)
+		b.showClientDetail(userID, id, msgID)
+
+	case strings.HasPrefix(data, "client_ib_add:"):
+		ack("")
+		parts := strings.SplitN(strings.TrimPrefix(data, "client_ib_add:"), ":", 2)
+		if len(parts) != 2 {
+			return
+		}
+		clientID, _ := strconv.ParseInt(parts[0], 10, 64)
+		inboundID, _ := strconv.ParseInt(parts[1], 10, 64)
+		b.send(userID, "⏳ Добавляю в inbound...")
+		if err := panel.AddExistingClientToInbound(clientID, inboundID); err != nil {
+			b.send(userID, "❌ Ошибка: "+err.Error())
+		} else {
+			b.showClientDetail(userID, clientID, 0)
+		}
+
+	// --- delete flow ---
 
 	case strings.HasPrefix(data, "del_confirm:"):
 		ack("")
 		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "del_confirm:"), 10, 64)
+		b.showDeleteConfirm(userID, id, msgID)
+
+	case strings.HasPrefix(data, "del_confirm_yes:"):
+		ack("")
+		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "del_confirm_yes:"), 10, 64)
 		name, err := panel.DeleteClient(id)
 		if err != nil {
 			b.send(userID, "❌ Ошибка: "+err.Error())
 		} else {
-			b.send(userID, fmt.Sprintf("✅ Пользователь '%s' успешно удалён", name))
+			b.sendOrEdit(userID, msgID, fmt.Sprintf("✅ Пользователь '%s' удалён", name), "",
+				tgbotapi.NewInlineKeyboardMarkup(
+					[]tgbotapi.InlineKeyboardButton{
+						tgbotapi.NewInlineKeyboardButtonData("👥 Список клиентов", "client_list_new"),
+						tgbotapi.NewInlineKeyboardButtonData("🏠 Меню", "back_to_menu"),
+					},
+				))
 		}
+
+	// --- operators ---
 
 	case data == "ops_manage":
 		ack("")

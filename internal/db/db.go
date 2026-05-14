@@ -19,6 +19,14 @@ type ClientRecord struct {
 	Comment string
 }
 
+type ClientDetails struct {
+	ID           int64
+	Comment      string
+	Subscription string
+	UUID         string
+	Emails       map[int64]string
+}
+
 func Init() {
 	var err error
 	conn, err = sql.Open("sqlite", config.Cfg.DBPath)
@@ -41,6 +49,7 @@ func Init() {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		comment TEXT NOT NULL,
 		subscription TEXT NOT NULL DEFAULT '',
+		uuid TEXT NOT NULL DEFAULT '',
 		email_vless TEXT NOT NULL DEFAULT '',
 		email_vmess TEXT NOT NULL DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -63,15 +72,15 @@ func Init() {
 		panic(err)
 	}
 
-	// One-time migration: add subscription column to old databases
+	// One-time column migrations for existing databases.
 	if _, err = conn.Exec(`ALTER TABLE clients ADD COLUMN subscription TEXT NOT NULL DEFAULT ''`); err != nil {
 		log.Printf("ℹ️ Колонка subscription уже существует")
 	}
+	conn.Exec(`ALTER TABLE clients ADD COLUMN uuid TEXT NOT NULL DEFAULT ''`)
 }
 
 // MigrateEmailsFromOldSchema copies email_vless/email_vmess data into
-// client_emails using the two legacy inbound IDs. This runs once on first
-// start after upgrading from v1.0/v1.1.
+// client_emails using the two legacy inbound IDs. Runs once after upgrading from v1.0/v1.1.
 func MigrateEmailsFromOldSchema(vlessID, vmessID int64) {
 	if vlessID == 0 && vmessID == 0 {
 		return
@@ -79,7 +88,7 @@ func MigrateEmailsFromOldSchema(vlessID, vmessID int64) {
 	var existing int
 	conn.QueryRow("SELECT COUNT(*) FROM client_emails").Scan(&existing)
 	if existing > 0 {
-		return // already migrated
+		return
 	}
 	var count int
 	conn.QueryRow("SELECT COUNT(*) FROM clients WHERE email_vless != '' OR email_vmess != ''").Scan(&count)
@@ -99,7 +108,7 @@ func MigrateEmailsFromOldSchema(vlessID, vmessID int64) {
 		rows.Scan(&r.id, &r.ev, &r.em)
 		records = append(records, r)
 	}
-	rows.Close() // release connection before inserts
+	rows.Close()
 
 	for _, r := range records {
 		if vlessID != 0 && r.ev != "" {
@@ -160,10 +169,10 @@ func ClientExistsBySubscription(subscription string) bool {
 }
 
 // SaveClient creates a client record and stores one email per inbound.
-func SaveClient(comment, subscription string, emails map[int64]string) error {
+func SaveClient(comment, subscription, uuid string, emails map[int64]string) error {
 	result, err := conn.Exec(
-		"INSERT INTO clients (comment, subscription, email_vless, email_vmess) VALUES (?, ?, '', '')",
-		comment, subscription,
+		"INSERT INTO clients (comment, subscription, uuid, email_vless, email_vmess) VALUES (?, ?, ?, '', '')",
+		comment, subscription, uuid,
 	)
 	if err != nil {
 		return err
@@ -181,6 +190,7 @@ func SaveClient(comment, subscription string, emails map[int64]string) error {
 }
 
 // GetClientEmails returns all inbound→email pairs for a client and its display name.
+// Used by panel.DeleteClient.
 func GetClientEmails(clientID int64) (emails map[int64]string, name string, err error) {
 	err = conn.QueryRow("SELECT comment FROM clients WHERE id = ?", clientID).Scan(&name)
 	if err != nil {
@@ -203,8 +213,46 @@ func GetClientEmails(clientID int64) (emails map[int64]string, name string, err 
 	return
 }
 
+// GetClientDetails returns full client info including subscription, uuid, and inbound emails.
+func GetClientDetails(id int64) (ClientDetails, error) {
+	var d ClientDetails
+	d.ID = id
+	err := conn.QueryRow(
+		"SELECT comment, subscription, uuid FROM clients WHERE id = ?", id,
+	).Scan(&d.Comment, &d.Subscription, &d.UUID)
+	if err != nil {
+		return d, fmt.Errorf("клиент не найден")
+	}
+	rows, err := conn.Query("SELECT inbound_id, email FROM client_emails WHERE client_id = ?", id)
+	if err != nil {
+		return d, err
+	}
+	defer rows.Close()
+	d.Emails = make(map[int64]string)
+	for rows.Next() {
+		var ibID int64
+		var email string
+		rows.Scan(&ibID, &email)
+		d.Emails[ibID] = email
+	}
+	return d, nil
+}
+
+// AddClientEmail inserts a new inbound→email mapping for an existing client.
+func AddClientEmail(clientID, inboundID int64, email string) error {
+	_, err := conn.Exec(
+		"INSERT OR IGNORE INTO client_emails (client_id, inbound_id, email) VALUES (?, ?, ?)",
+		clientID, inboundID, email,
+	)
+	return err
+}
+
+// SetClientUUID persists the UUID for a client that was missing one.
+func SetClientUUID(clientID int64, uuid string) {
+	conn.Exec("UPDATE clients SET uuid = ? WHERE id = ?", uuid, clientID)
+}
+
 // GetClientsPage returns one page of clients and total count.
-// Using LIMIT/OFFSET prevents sending hundreds of buttons to Telegram at once.
 func GetClientsPage(page int) (clients []ClientRecord, total int, err error) {
 	err = conn.QueryRow("SELECT COUNT(*) FROM clients").Scan(&total)
 	if err != nil {

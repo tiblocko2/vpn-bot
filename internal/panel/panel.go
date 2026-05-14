@@ -142,8 +142,7 @@ func deleteClientByEmail(inboundID int64, email string) error {
 	)
 }
 
-// AddClient adds the client to all configured inbounds with individual emails,
-// all sharing one subId and UUID.
+// AddClient adds the client to all configured inbounds, all sharing one subId and UUID.
 func AddClient(name string) (string, error) {
 	if err := Login(); err != nil {
 		return "", fmt.Errorf("ошибка авторизации: %v", err)
@@ -169,7 +168,7 @@ func AddClient(name string) (string, error) {
 		}
 	}
 
-	if err := db.SaveClient(name, subscription, emails); err != nil {
+	if err := db.SaveClient(name, subscription, uuid, emails); err != nil {
 		return "", fmt.Errorf("ошибка сохранения в БД: %v", err)
 	}
 
@@ -200,6 +199,50 @@ func DeleteClient(id int64) (string, error) {
 	}
 
 	return name, db.DeleteClient(id)
+}
+
+// AddExistingClientToInbound adds an existing client to a new inbound,
+// reusing their subscription and UUID.
+func AddExistingClientToInbound(clientID int64, targetInboundID int64) error {
+	details, err := db.GetClientDetails(clientID)
+	if err != nil {
+		return err
+	}
+
+	if err := Login(); err != nil {
+		return fmt.Errorf("ошибка авторизации: %v", err)
+	}
+
+	uuid := details.UUID
+	if uuid == "" {
+		// Try to find UUID from an existing inbound via panel API.
+		for ibID := range details.Emails {
+			clients, err := getInboundClients(ibID)
+			if err != nil {
+				continue
+			}
+			for _, c := range clients {
+				if c.SubID == details.Subscription && c.UUID != "" {
+					uuid = c.UUID
+					db.SetClientUUID(clientID, uuid)
+					break
+				}
+			}
+			if uuid != "" {
+				break
+			}
+		}
+	}
+	if uuid == "" {
+		uuid = generateUUID()
+		db.SetClientUUID(clientID, uuid)
+	}
+
+	email := randomEmail()
+	if err := addClientToInbound(targetInboundID, email, details.Comment, details.Subscription, uuid); err != nil {
+		return fmt.Errorf("ошибка добавления в inbound %d: %v", targetInboundID, err)
+	}
+	return db.AddClientEmail(clientID, targetInboundID, email)
 }
 
 // --- inbound list ---
@@ -247,18 +290,18 @@ func GetInboundList() ([]PanelInbound, error) {
 
 // ImportResult summarises one sync run from the panel.
 type ImportResult struct {
-	Imported int // new records written to bot DB
-	Skipped  int // already present in bot DB (matched by subscription/subId)
+	Imported int
+	Skipped  int
 }
 
 type inboundClient struct {
+	UUID    string
 	Email   string
 	Comment string
 	SubID   string
 }
 
-// getInboundClients fetches all clients from one inbound and returns only those
-// with a non-empty subId (clients without subId cannot be grouped).
+// getInboundClients fetches all clients from one inbound (with non-empty subId).
 func getInboundClients(inboundID int64) ([]inboundClient, error) {
 	body, err := getRequest(fmt.Sprintf("/panel/api/inbounds/get/%d", inboundID))
 	if err != nil {
@@ -280,6 +323,7 @@ func getInboundClients(inboundID int64) ([]inboundClient, error) {
 
 	var settings struct {
 		Clients []struct {
+			UUID    string `json:"id"`
 			Email   string `json:"email"`
 			Comment string `json:"comment"`
 			SubID   string `json:"subId"`
@@ -292,15 +336,13 @@ func getInboundClients(inboundID int64) ([]inboundClient, error) {
 	var out []inboundClient
 	for _, c := range settings.Clients {
 		if c.SubID != "" {
-			out = append(out, inboundClient{Email: c.Email, Comment: c.Comment, SubID: c.SubID})
+			out = append(out, inboundClient{UUID: c.UUID, Email: c.Email, Comment: c.Comment, SubID: c.SubID})
 		}
 	}
 	return out, nil
 }
 
-// ImportClientsFromPanel scans the specified inbounds and imports clients into
-// the bot database. Clients are keyed by subId; a client is imported as soon
-// as it appears in at least one of the provided inbounds.
+// ImportClientsFromPanel scans the specified inbounds and imports clients into the bot DB.
 func ImportClientsFromPanel(inboundIDs []int64) (ImportResult, error) {
 	if len(inboundIDs) == 0 {
 		return ImportResult{}, fmt.Errorf("не выбраны inbound для импорта")
@@ -309,9 +351,9 @@ func ImportClientsFromPanel(inboundIDs []int64) (ImportResult, error) {
 		return ImportResult{}, fmt.Errorf("ошибка авторизации: %v", err)
 	}
 
-	// subId → map[inboundID]inboundClient
 	type entry struct {
 		comment string
+		uuid    string
 		emails  map[int64]string
 	}
 	bySubID := make(map[string]*entry)
@@ -331,6 +373,9 @@ func ImportClientsFromPanel(inboundIDs []int64) (ImportResult, error) {
 			if e.comment == "" {
 				e.comment = c.Comment
 			}
+			if e.uuid == "" {
+				e.uuid = c.UUID
+			}
 		}
 	}
 
@@ -344,7 +389,7 @@ func ImportClientsFromPanel(inboundIDs []int64) (ImportResult, error) {
 		if comment == "" {
 			comment = subID
 		}
-		if err := db.SaveClient(comment, subID, e.emails); err != nil {
+		if err := db.SaveClient(comment, subID, e.uuid, e.emails); err != nil {
 			log.Printf("⚠️ Ошибка импорта клиента subId=%s: %v", subID, err)
 			continue
 		}
