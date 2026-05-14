@@ -17,6 +17,7 @@ func main() {
 	log.Println("⏳ Инициализация БД...")
 	db.Init()
 	db.MigrateEmailsFromOldSchema(config.Cfg.VlessInboundID, config.Cfg.VmessInboundID)
+	log.Println("⏳ Инициализация панели...")
 	panel.InitHTTPClient()
 
 	log.Printf("⏳ Подключение к Telegram API (proxy_url=%q)...", config.Cfg.ProxyURL)

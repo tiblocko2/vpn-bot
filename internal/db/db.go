@@ -92,19 +92,24 @@ func MigrateEmailsFromOldSchema(vlessID, vmessID int64) {
 		log.Printf("⚠️ Ошибка миграции emails: %v", err)
 		return
 	}
-	defer rows.Close()
+	type row struct{ id int64; ev, em string }
+	var records []row
 	for rows.Next() {
-		var id int64
-		var ev, em string
-		rows.Scan(&id, &ev, &em)
-		if vlessID != 0 && ev != "" {
-			conn.Exec("INSERT OR IGNORE INTO client_emails VALUES (?, ?, ?)", id, vlessID, ev)
+		var r row
+		rows.Scan(&r.id, &r.ev, &r.em)
+		records = append(records, r)
+	}
+	rows.Close() // release connection before inserts
+
+	for _, r := range records {
+		if vlessID != 0 && r.ev != "" {
+			conn.Exec("INSERT OR IGNORE INTO client_emails VALUES (?, ?, ?)", r.id, vlessID, r.ev)
 		}
-		if vmessID != 0 && em != "" {
-			conn.Exec("INSERT OR IGNORE INTO client_emails VALUES (?, ?, ?)", id, vmessID, em)
+		if vmessID != 0 && r.em != "" {
+			conn.Exec("INSERT OR IGNORE INTO client_emails VALUES (?, ?, ?)", r.id, vmessID, r.em)
 		}
 	}
-	log.Printf("✅ Мигрировано %d клиентов в client_emails", count)
+	log.Printf("✅ Мигрировано %d клиентов в client_emails", len(records))
 }
 
 func IsOperator(userID int64) bool {
