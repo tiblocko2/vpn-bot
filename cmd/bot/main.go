@@ -18,10 +18,6 @@ func main() {
 	db.MigrateEmailsFromOldSchema(config.Cfg.VlessInboundID, config.Cfg.VmessInboundID)
 	panel.InitHTTPClient()
 
-	if err := panel.Login(); err != nil {
-		log.Printf("⚠️ Ошибка авторизации в панели при запуске: %v", err)
-	}
-
 	b, err := bot.New()
 	if err != nil {
 		log.Fatalf("❌ Ошибка создания бота: %v", err)

@@ -23,6 +23,7 @@ var (
 
 func InitHTTPClient() {
 	client = &http.Client{
+		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
