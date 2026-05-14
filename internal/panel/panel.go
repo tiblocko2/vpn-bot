@@ -55,6 +55,27 @@ func Login() error {
 	return nil
 }
 
+func getRequest(method string) ([]byte, error) {
+	req, err := http.NewRequest("GET", config.Cfg.PanelURL+method, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP ошибка (%s): %v", method, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		return nil, fmt.Errorf("пустой ответ от панели (status: %d, метод: %s)", resp.StatusCode, method)
+	}
+	return body, nil
+}
+
 func postRequest(method string, payload interface{}) error {
 	bodyBytes := []byte("{}")
 	if payload != nil {
@@ -120,36 +141,44 @@ func deleteClientByEmail(inboundID int64, email string) error {
 	)
 }
 
+// AddClient adds the client to all configured inbounds with individual emails,
+// all sharing one subId and UUID.
 func AddClient(name string) (string, error) {
 	if err := Login(); err != nil {
 		return "", fmt.Errorf("ошибка авторизации: %v", err)
 	}
 
+	inbounds := config.Cfg.Inbounds
+	if len(inbounds) == 0 {
+		return "", fmt.Errorf("не настроены inbound в конфиге")
+	}
+
 	subscription := normalizeName(name)
-	emailVless := randomEmail()
-	emailVmess := randomEmail()
 	uuid := generateUUID()
+	emails := make(map[int64]string, len(inbounds))
 
-	if err := addClientToInbound(config.Cfg.VlessInboundID, emailVless, name, subscription, uuid); err != nil {
-		return "", fmt.Errorf("ошибка добавления в inbound %d: %v", config.Cfg.VlessInboundID, err)
+	for i, ib := range inbounds {
+		email := randomEmail()
+		if err := addClientToInbound(ib.ID, email, name, subscription, uuid); err != nil {
+			return "", fmt.Errorf("ошибка добавления в inbound %d (%s): %v", ib.ID, ib.Label, err)
+		}
+		emails[ib.ID] = email
+		if i < len(inbounds)-1 {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
-	time.Sleep(200 * time.Millisecond)
 
-	if err := addClientToInbound(config.Cfg.VmessInboundID, emailVmess, name, subscription, uuid); err != nil {
-		return "", fmt.Errorf("ошибка добавления в inbound %d: %v", config.Cfg.VmessInboundID, err)
-	}
-
-	if err := db.SaveClient(name, subscription, emailVless, emailVmess); err != nil {
+	if err := db.SaveClient(name, subscription, emails); err != nil {
 		return "", fmt.Errorf("ошибка сохранения в БД: %v", err)
 	}
 
 	return fmt.Sprintf("%s/%s", config.Cfg.SubDomain, subscription), nil
 }
 
-// DeleteClient removes a client from both panel inbounds and the database.
-// Returns the client display name for confirmation messages.
+// DeleteClient removes a client from every inbound it has an email in,
+// then deletes the database record.
 func DeleteClient(id int64) (string, error) {
-	emailVless, emailVmess, name, err := db.GetClientEmails(id)
+	emails, name, err := db.GetClientEmails(id)
 	if err != nil {
 		return "", fmt.Errorf("клиент не найден в базе")
 	}
@@ -158,16 +187,169 @@ func DeleteClient(id int64) (string, error) {
 		return name, fmt.Errorf("ошибка авторизации: %v", err)
 	}
 
-	if err := deleteClientByEmail(config.Cfg.VlessInboundID, emailVless); err != nil {
-		return name, fmt.Errorf("ошибка удаления из inbound %d: %v", config.Cfg.VlessInboundID, err)
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	if err := deleteClientByEmail(config.Cfg.VmessInboundID, emailVmess); err != nil {
-		return name, fmt.Errorf("ошибка удаления из inbound %d: %v", config.Cfg.VmessInboundID, err)
+	first := true
+	for inboundID, email := range emails {
+		if !first {
+			time.Sleep(200 * time.Millisecond)
+		}
+		if err := deleteClientByEmail(inboundID, email); err != nil {
+			log.Printf("⚠️ Ошибка удаления из inbound %d: %v", inboundID, err)
+		}
+		first = false
 	}
 
 	return name, db.DeleteClient(id)
+}
+
+// --- inbound list ---
+
+// PanelInbound is a minimal representation of a 3X-UI inbound.
+type PanelInbound struct {
+	ID       int64
+	Remark   string
+	Protocol string
+	Enable   bool
+}
+
+// GetInboundList fetches all inbounds from the panel.
+func GetInboundList() ([]PanelInbound, error) {
+	if err := Login(); err != nil {
+		return nil, fmt.Errorf("ошибка авторизации: %v", err)
+	}
+	body, err := getRequest("/panel/api/inbounds/list")
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Success bool `json:"success"`
+		Obj     []struct {
+			ID       int64  `json:"id"`
+			Remark   string `json:"remark"`
+			Protocol string `json:"protocol"`
+			Enable   bool   `json:"enable"`
+		} `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга списка inbound: %v", err)
+	}
+	if !result.Success {
+		return nil, fmt.Errorf("API вернул ошибку при получении inbound")
+	}
+	var out []PanelInbound
+	for _, o := range result.Obj {
+		out = append(out, PanelInbound{ID: o.ID, Remark: o.Remark, Protocol: o.Protocol, Enable: o.Enable})
+	}
+	return out, nil
+}
+
+// --- import ---
+
+// ImportResult summarises one sync run from the panel.
+type ImportResult struct {
+	Imported int // new records written to bot DB
+	Skipped  int // already present in bot DB (matched by subscription/subId)
+}
+
+type inboundClient struct {
+	Email   string
+	Comment string
+	SubID   string
+}
+
+// getInboundClients fetches all clients from one inbound and returns only those
+// with a non-empty subId (clients without subId cannot be grouped).
+func getInboundClients(inboundID int64) ([]inboundClient, error) {
+	body, err := getRequest(fmt.Sprintf("/panel/api/inbounds/get/%d", inboundID))
+	if err != nil {
+		return nil, err
+	}
+
+	var envelope struct {
+		Success bool `json:"success"`
+		Obj     struct {
+			Settings string `json:"settings"`
+		} `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга inbound %d: %v", inboundID, err)
+	}
+	if !envelope.Success {
+		return nil, fmt.Errorf("API вернул ошибку для inbound %d", inboundID)
+	}
+
+	var settings struct {
+		Clients []struct {
+			Email   string `json:"email"`
+			Comment string `json:"comment"`
+			SubID   string `json:"subId"`
+		} `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(envelope.Obj.Settings), &settings); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга settings inbound %d: %v", inboundID, err)
+	}
+
+	var out []inboundClient
+	for _, c := range settings.Clients {
+		if c.SubID != "" {
+			out = append(out, inboundClient{Email: c.Email, Comment: c.Comment, SubID: c.SubID})
+		}
+	}
+	return out, nil
+}
+
+// ImportClientsFromPanel scans the specified inbounds and imports clients into
+// the bot database. Clients are keyed by subId; a client is imported as soon
+// as it appears in at least one of the provided inbounds.
+func ImportClientsFromPanel(inboundIDs []int64) (ImportResult, error) {
+	if len(inboundIDs) == 0 {
+		return ImportResult{}, fmt.Errorf("не выбраны inbound для импорта")
+	}
+	if err := Login(); err != nil {
+		return ImportResult{}, fmt.Errorf("ошибка авторизации: %v", err)
+	}
+
+	// subId → map[inboundID]inboundClient
+	type entry struct {
+		comment string
+		emails  map[int64]string
+	}
+	bySubID := make(map[string]*entry)
+
+	for _, ibID := range inboundIDs {
+		clients, err := getInboundClients(ibID)
+		if err != nil {
+			return ImportResult{}, fmt.Errorf("ошибка получения inbound %d: %v", ibID, err)
+		}
+		for _, c := range clients {
+			e, ok := bySubID[c.SubID]
+			if !ok {
+				e = &entry{comment: c.Comment, emails: make(map[int64]string)}
+				bySubID[c.SubID] = e
+			}
+			e.emails[ibID] = c.Email
+			if e.comment == "" {
+				e.comment = c.Comment
+			}
+		}
+	}
+
+	var res ImportResult
+	for subID, e := range bySubID {
+		if db.ClientExistsBySubscription(subID) {
+			res.Skipped++
+			continue
+		}
+		comment := e.comment
+		if comment == "" {
+			comment = subID
+		}
+		if err := db.SaveClient(comment, subID, e.emails); err != nil {
+			log.Printf("⚠️ Ошибка импорта клиента subId=%s: %v", subID, err)
+			continue
+		}
+		res.Imported++
+	}
+	return res, nil
 }
 
 // --- helpers ---
@@ -231,179 +413,4 @@ func generateUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
-}
-
-// --- inbound list ---
-
-// PanelInbound is a minimal representation of a 3X-UI inbound.
-type PanelInbound struct {
-	ID       int64
-	Remark   string
-	Protocol string
-	Enable   bool
-}
-
-// GetInboundList fetches all inbounds from the panel.
-func GetInboundList() ([]PanelInbound, error) {
-	if err := Login(); err != nil {
-		return nil, fmt.Errorf("ошибка авторизации: %v", err)
-	}
-	body, err := getRequest("/panel/api/inbounds/list")
-	if err != nil {
-		return nil, err
-	}
-	var result struct {
-		Success bool `json:"success"`
-		Obj     []struct {
-			ID       int64  `json:"id"`
-			Remark   string `json:"remark"`
-			Protocol string `json:"protocol"`
-			Enable   bool   `json:"enable"`
-		} `json:"obj"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("ошибка парсинга списка inbound: %v", err)
-	}
-	if !result.Success {
-		return nil, fmt.Errorf("API вернул ошибку при получении inbound")
-	}
-	var out []PanelInbound
-	for _, o := range result.Obj {
-		out = append(out, PanelInbound{ID: o.ID, Remark: o.Remark, Protocol: o.Protocol, Enable: o.Enable})
-	}
-	return out, nil
-}
-
-// --- 3X-UI import ---
-
-// ImportResult summarises one sync run from the panel.
-type ImportResult struct {
-	Imported int // new records written to bot DB
-	Skipped  int // already present in bot DB (matched by subscription/subId)
-	Orphaned int // found in only one inbound — cannot sync without both emails
-}
-
-type inboundClient struct {
-	Email   string
-	Comment string
-	SubID   string
-}
-
-func getRequest(method string) ([]byte, error) {
-	req, err := http.NewRequest("GET", config.Cfg.PanelURL+method, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP ошибка (%s): %v", method, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if len(body) == 0 {
-		return nil, fmt.Errorf("пустой ответ от панели (status: %d, метод: %s)", resp.StatusCode, method)
-	}
-	return body, nil
-}
-
-// getInboundClients fetches all clients from one inbound and returns only those
-// with a non-empty subId (clients without subId cannot be grouped).
-func getInboundClients(inboundID int64) ([]inboundClient, error) {
-	body, err := getRequest(fmt.Sprintf("/panel/api/inbounds/get/%d", inboundID))
-	if err != nil {
-		return nil, err
-	}
-
-	// 3X-UI wraps inbound data in obj.settings as an escaped JSON string
-	var envelope struct {
-		Success bool `json:"success"`
-		Obj     struct {
-			Settings string `json:"settings"`
-		} `json:"obj"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("ошибка парсинга inbound %d: %v", inboundID, err)
-	}
-	if !envelope.Success {
-		return nil, fmt.Errorf("API вернул ошибку для inbound %d", inboundID)
-	}
-
-	var settings struct {
-		Clients []struct {
-			Email   string `json:"email"`
-			Comment string `json:"comment"`
-			SubID   string `json:"subId"`
-		} `json:"clients"`
-	}
-	if err := json.Unmarshal([]byte(envelope.Obj.Settings), &settings); err != nil {
-		return nil, fmt.Errorf("ошибка парсинга settings inbound %d: %v", inboundID, err)
-	}
-
-	var out []inboundClient
-	for _, c := range settings.Clients {
-		if c.SubID != "" {
-			out = append(out, inboundClient{Email: c.Email, Comment: c.Comment, SubID: c.SubID})
-		}
-	}
-	return out, nil
-}
-
-// ImportClientsFromPanel syncs clients from the two configured 3X-UI inbounds
-// into the bot database. Clients are paired by subId. Already-known clients
-// (matched by subscription) are counted as skipped, not duplicated.
-func ImportClientsFromPanel() (ImportResult, error) {
-	if err := Login(); err != nil {
-		return ImportResult{}, fmt.Errorf("ошибка авторизации: %v", err)
-	}
-
-	vlessClients, err := getInboundClients(config.Cfg.VlessInboundID)
-	if err != nil {
-		return ImportResult{}, fmt.Errorf("ошибка получения inbound %d: %v", config.Cfg.VlessInboundID, err)
-	}
-
-	vmessClients, err := getInboundClients(config.Cfg.VmessInboundID)
-	if err != nil {
-		return ImportResult{}, fmt.Errorf("ошибка получения inbound %d: %v", config.Cfg.VmessInboundID, err)
-	}
-
-	// Index VMess clients by subId for O(1) pairing
-	vmessMap := make(map[string]inboundClient, len(vmessClients))
-	for _, c := range vmessClients {
-		vmessMap[c.SubID] = c
-	}
-
-	var res ImportResult
-	for _, vless := range vlessClients {
-		vmess, paired := vmessMap[vless.SubID]
-		if !paired {
-			res.Orphaned++
-			continue
-		}
-
-		if db.ClientExistsBySubscription(vless.SubID) {
-			res.Skipped++
-			continue
-		}
-
-		// Use VLESS comment; fall back to VMess comment, then subId itself
-		comment := vless.Comment
-		if comment == "" {
-			comment = vmess.Comment
-		}
-		if comment == "" {
-			comment = vless.SubID
-		}
-
-		if err := db.SaveClient(comment, vless.SubID, vless.Email, vmess.Email); err != nil {
-			log.Printf("⚠️ Ошибка импорта клиента subId=%s: %v", vless.SubID, err)
-			continue
-		}
-		res.Imported++
-	}
-
-	return res, nil
 }

@@ -186,24 +186,44 @@ func (b *Bot) showAddOp(userID int64) {
 }
 
 func (b *Bot) showInboundSettings(userID int64) {
-	text := fmt.Sprintf(
-		"⚙️ Управление inbound\n\nVLESS inbound ID: `%d`\nVMess inbound ID: `%d`\n\nВыберите, что изменить:",
-		config.Cfg.VlessInboundID, config.Cfg.VmessInboundID,
-	)
-	buttons := [][]tgbotapi.InlineKeyboardButton{
-		{tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("✏️ VLESS inbound (ID: %d)", config.Cfg.VlessInboundID), "pick_vless")},
-		{tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("✏️ VMess inbound (ID: %d)", config.Cfg.VmessInboundID), "pick_vmess")},
-		{tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "back_to_menu")},
+	inbounds := config.Cfg.Inbounds
+	text := "⚙️ Настроенные inbound:\n\n"
+	if len(inbounds) == 0 {
+		text += "_ни один не добавлен_"
+	} else {
+		for _, ib := range inbounds {
+			text += fmt.Sprintf("• [%d] %s\n", ib.ID, ib.Label)
+		}
 	}
+
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	for _, ib := range inbounds {
+		label := fmt.Sprintf("❌ [%d] %s", ib.ID, ib.Label)
+		if len([]rune(label)) > 50 {
+			label = string([]rune(label)[:50])
+		}
+		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("ib_remove:%d", ib.ID)),
+		})
+	}
+	buttons = append(buttons,
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("➕ Добавить inbound", "ib_add"),
+		},
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "back_to_menu"),
+		},
+	)
+
 	msg := tgbotapi.NewMessage(userID, text)
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	b.api.Send(msg)
 }
 
-// showInboundPicker fetches the live inbound list from the panel and renders
-// each one as a button. role is "vless" or "vmess".
-func (b *Bot) showInboundPicker(userID int64, role string) {
+// showInboundPicker fetches the live inbound list from the panel and shows
+// inbounds not yet configured, so the user can add one.
+func (b *Bot) showInboundPicker(userID int64) {
 	b.send(userID, "⏳ Загружаю список inbound из панели...")
 
 	inbounds, err := panel.GetInboundList()
@@ -216,24 +236,90 @@ func (b *Bot) showInboundPicker(userID int64, role string) {
 		return
 	}
 
-	roleLabel := map[string]string{"vless": "VLESS", "vmess": "VMess"}[role]
+	configured := make(map[int64]bool)
+	for _, ib := range config.Cfg.Inbounds {
+		configured[ib.ID] = true
+	}
 
 	var buttons [][]tgbotapi.InlineKeyboardButton
 	for _, ib := range inbounds {
+		if configured[ib.ID] {
+			continue
+		}
 		status := ""
 		if !ib.Enable {
 			status = " ⚫"
 		}
 		label := fmt.Sprintf("[%d] %s (%s)%s", ib.ID, ib.Remark, ib.Protocol, status)
 		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("set_%s:%d", role, ib.ID)),
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("ib_add_pick:%d", ib.ID)),
 		})
+	}
+	if len(buttons) == 0 {
+		b.send(userID, "✅ Все inbound из панели уже добавлены в конфиг")
+		b.showInboundSettings(userID)
+		return
 	}
 	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "inbound_settings"),
 	})
 
-	msg := tgbotapi.NewMessage(userID, fmt.Sprintf("Выберите inbound для %s:", roleLabel))
+	msg := tgbotapi.NewMessage(userID, "Выберите inbound для добавления:")
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	b.api.Send(msg)
+}
+
+// showImportSelection renders a checklist of configured inbounds for the user
+// to select which ones to import from.
+func (b *Bot) showImportSelection(userID int64) {
+	inbounds := config.Cfg.Inbounds
+	if len(inbounds) == 0 {
+		b.send(userID, "❌ Нет настроенных inbound для импорта")
+		return
+	}
+
+	sel := b.importSelection[userID]
+	if sel == nil {
+		sel = make(map[int64]bool)
+		b.importSelection[userID] = sel
+	}
+
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	for _, ib := range inbounds {
+		mark := "⬜"
+		if sel[ib.ID] {
+			mark = "✅"
+		}
+		label := fmt.Sprintf("%s [%d] %s", mark, ib.ID, ib.Label)
+		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("import_toggle:%d", ib.ID)),
+		})
+	}
+
+	anySelected := false
+	for _, v := range sel {
+		if v {
+			anySelected = true
+			break
+		}
+	}
+
+	runLabel := "⚠️ Выберите хотя бы один inbound"
+	runData := "noop"
+	if anySelected {
+		runLabel = "▶️ Запустить импорт"
+		runData = "import_run"
+	}
+	buttons = append(buttons,
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(runLabel, runData),
+		},
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", "back_to_menu"),
+		},
+	)
+
+	msg := tgbotapi.NewMessage(userID, "📥 Выберите inbound для импорта клиентов:")
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	b.api.Send(msg)
 }

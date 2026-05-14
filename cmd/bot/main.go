@@ -15,6 +15,7 @@ func main() {
 	}
 
 	db.Init()
+	db.MigrateEmailsFromOldSchema(config.Cfg.VlessInboundID, config.Cfg.VmessInboundID)
 	panel.InitHTTPClient()
 
 	if err := panel.Login(); err != nil {

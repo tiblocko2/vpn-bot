@@ -67,18 +67,48 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 			b.send(userID, fmt.Sprintf("✅ Оператор %d удалён", opID))
 		}
 
+	// --- import flow ---
+
 	case data == "import_panel":
 		ack("")
+		delete(b.importSelection, userID)
+		b.showImportSelection(userID)
+
+	case strings.HasPrefix(data, "import_toggle:"):
+		ack("")
+		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "import_toggle:"), 10, 64)
+		if b.importSelection[userID] == nil {
+			b.importSelection[userID] = make(map[int64]bool)
+		}
+		b.importSelection[userID][id] = !b.importSelection[userID][id]
+		b.showImportSelection(userID)
+
+	case data == "import_run":
+		ack("")
+		sel := b.importSelection[userID]
+		var ids []int64
+		for id, on := range sel {
+			if on {
+				ids = append(ids, id)
+			}
+		}
+		delete(b.importSelection, userID)
+		if len(ids) == 0 {
+			b.send(userID, "❌ Не выбрано ни одного inbound")
+			return
+		}
 		b.send(userID, "⏳ Импортирую клиентов из 3X-UI...")
-		res, err := panel.ImportClientsFromPanel()
+		res, err := panel.ImportClientsFromPanel(ids)
 		if err != nil {
 			b.send(userID, "❌ Ошибка импорта: "+err.Error())
 		} else {
 			b.send(userID, fmt.Sprintf(
-				"✅ Импорт завершён:\n• Добавлено: %d\n• Уже существуют: %d\n• Только в одном inbound: %d",
-				res.Imported, res.Skipped, res.Orphaned,
+				"✅ Импорт завершён:\n• Добавлено: %d\n• Уже существуют: %d",
+				res.Imported, res.Skipped,
 			))
 		}
+
+	// --- inbound management (superuser only) ---
 
 	case data == "inbound_settings":
 		if userID != config.Cfg.SuperUserID {
@@ -88,49 +118,48 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 		ack("")
 		b.showInboundSettings(userID)
 
-	case data == "pick_vless":
+	case data == "ib_add":
 		if userID != config.Cfg.SuperUserID {
 			ack("❌ Нет доступа")
 			return
 		}
 		ack("")
-		b.showInboundPicker(userID, "vless")
+		b.showInboundPicker(userID)
 
-	case data == "pick_vmess":
+	case strings.HasPrefix(data, "ib_add_pick:"):
 		if userID != config.Cfg.SuperUserID {
 			ack("❌ Нет доступа")
 			return
 		}
 		ack("")
-		b.showInboundPicker(userID, "vmess")
-
-	case strings.HasPrefix(data, "set_vless:"):
-		if userID != config.Cfg.SuperUserID {
-			ack("❌ Нет доступа")
-			return
+		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "ib_add_pick:"), 10, 64)
+		label := fmt.Sprintf("Inbound %d", id)
+		if list, err := panel.GetInboundList(); err == nil {
+			for _, ib := range list {
+				if ib.ID == id {
+					label = ib.Remark
+					break
+				}
+			}
 		}
-		ack("")
-		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "set_vless:"), 10, 64)
-		config.Cfg.VlessInboundID = id
-		if err := config.Save(); err != nil {
+		if err := config.AddInbound(config.InboundConfig{ID: id, Label: label}); err != nil {
 			b.send(userID, "❌ Ошибка сохранения: "+err.Error())
 		} else {
-			b.send(userID, fmt.Sprintf("✅ VLESS inbound изменён на ID: %d", id))
+			b.send(userID, fmt.Sprintf("✅ Inbound [%d] %s добавлен", id, label))
 			b.showInboundSettings(userID)
 		}
 
-	case strings.HasPrefix(data, "set_vmess:"):
+	case strings.HasPrefix(data, "ib_remove:"):
 		if userID != config.Cfg.SuperUserID {
 			ack("❌ Нет доступа")
 			return
 		}
 		ack("")
-		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "set_vmess:"), 10, 64)
-		config.Cfg.VmessInboundID = id
-		if err := config.Save(); err != nil {
+		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "ib_remove:"), 10, 64)
+		if err := config.RemoveInbound(id); err != nil {
 			b.send(userID, "❌ Ошибка сохранения: "+err.Error())
 		} else {
-			b.send(userID, fmt.Sprintf("✅ VMess inbound изменён на ID: %d", id))
+			b.send(userID, fmt.Sprintf("✅ Inbound %d удалён из конфига", id))
 			b.showInboundSettings(userID)
 		}
 

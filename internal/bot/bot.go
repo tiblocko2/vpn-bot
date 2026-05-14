@@ -18,8 +18,9 @@ import (
 
 // Bot wraps the Telegram API client and holds per-user conversation state.
 type Bot struct {
-	api       *tgbotapi.BotAPI
-	userState map[int64]string
+	api             *tgbotapi.BotAPI
+	userState       map[int64]string
+	importSelection map[int64]map[int64]bool // userID → inboundID → selected
 }
 
 func New() (*Bot, error) {
@@ -33,7 +34,11 @@ func New() (*Bot, error) {
 	}
 	api.Debug = false
 	log.Printf("✅ Бот запущен, username: @%s", api.Self.UserName)
-	return &Bot{api: api, userState: make(map[int64]string)}, nil
+	return &Bot{
+		api:             api,
+		userState:       make(map[int64]string),
+		importSelection: make(map[int64]map[int64]bool),
+	}, nil
 }
 
 func (b *Bot) Run() {
