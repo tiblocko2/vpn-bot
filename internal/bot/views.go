@@ -10,6 +10,7 @@ import (
 
 	"vpn-bot/internal/config"
 	"vpn-bot/internal/db"
+	"vpn-bot/internal/panel"
 )
 
 func (b *Bot) showMenu(userID int64) {
@@ -28,6 +29,9 @@ func (b *Bot) showMenu(userID int64) {
 			},
 			[]tgbotapi.InlineKeyboardButton{
 				tgbotapi.NewInlineKeyboardButtonData("🌐 Сменить домен подписок", "change_domain"),
+			},
+			[]tgbotapi.InlineKeyboardButton{
+				tgbotapi.NewInlineKeyboardButtonData("⚙️ Управление inbound", "inbound_settings"),
 			},
 		)
 	}
@@ -178,6 +182,59 @@ func (b *Bot) showAddOp(userID int64) {
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		[]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", "cancel")},
 	)
+	b.api.Send(msg)
+}
+
+func (b *Bot) showInboundSettings(userID int64) {
+	text := fmt.Sprintf(
+		"⚙️ Управление inbound\n\nVLESS inbound ID: `%d`\nVMess inbound ID: `%d`\n\nВыберите, что изменить:",
+		config.Cfg.VlessInboundID, config.Cfg.VmessInboundID,
+	)
+	buttons := [][]tgbotapi.InlineKeyboardButton{
+		{tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("✏️ VLESS inbound (ID: %d)", config.Cfg.VlessInboundID), "pick_vless")},
+		{tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("✏️ VMess inbound (ID: %d)", config.Cfg.VmessInboundID), "pick_vmess")},
+		{tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "back_to_menu")},
+	}
+	msg := tgbotapi.NewMessage(userID, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	b.api.Send(msg)
+}
+
+// showInboundPicker fetches the live inbound list from the panel and renders
+// each one as a button. role is "vless" or "vmess".
+func (b *Bot) showInboundPicker(userID int64, role string) {
+	b.send(userID, "⏳ Загружаю список inbound из панели...")
+
+	inbounds, err := panel.GetInboundList()
+	if err != nil {
+		b.send(userID, "❌ Ошибка загрузки inbound: "+err.Error())
+		return
+	}
+	if len(inbounds) == 0 {
+		b.send(userID, "❌ Inbound не найдены в панели")
+		return
+	}
+
+	roleLabel := map[string]string{"vless": "VLESS", "vmess": "VMess"}[role]
+
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	for _, ib := range inbounds {
+		status := ""
+		if !ib.Enable {
+			status = " ⚫"
+		}
+		label := fmt.Sprintf("[%d] %s (%s)%s", ib.ID, ib.Remark, ib.Protocol, status)
+		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("set_%s:%d", role, ib.ID)),
+		})
+	}
+	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "inbound_settings"),
+	})
+
+	msg := tgbotapi.NewMessage(userID, fmt.Sprintf("Выберите inbound для %s:", roleLabel))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	b.api.Send(msg)
 }
 

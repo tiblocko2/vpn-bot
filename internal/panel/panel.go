@@ -233,6 +233,47 @@ func generateUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
+// --- inbound list ---
+
+// PanelInbound is a minimal representation of a 3X-UI inbound.
+type PanelInbound struct {
+	ID       int64
+	Remark   string
+	Protocol string
+	Enable   bool
+}
+
+// GetInboundList fetches all inbounds from the panel.
+func GetInboundList() ([]PanelInbound, error) {
+	if err := Login(); err != nil {
+		return nil, fmt.Errorf("ошибка авторизации: %v", err)
+	}
+	body, err := getRequest("/panel/api/inbounds/list")
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Success bool `json:"success"`
+		Obj     []struct {
+			ID       int64  `json:"id"`
+			Remark   string `json:"remark"`
+			Protocol string `json:"protocol"`
+			Enable   bool   `json:"enable"`
+		} `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга списка inbound: %v", err)
+	}
+	if !result.Success {
+		return nil, fmt.Errorf("API вернул ошибку при получении inbound")
+	}
+	var out []PanelInbound
+	for _, o := range result.Obj {
+		out = append(out, PanelInbound{ID: o.ID, Remark: o.Remark, Protocol: o.Protocol, Enable: o.Enable})
+	}
+	return out, nil
+}
+
 // --- 3X-UI import ---
 
 // ImportResult summarises one sync run from the panel.

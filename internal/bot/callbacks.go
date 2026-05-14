@@ -80,6 +80,60 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 			))
 		}
 
+	case data == "inbound_settings":
+		if userID != config.Cfg.SuperUserID {
+			ack("❌ Нет доступа")
+			return
+		}
+		ack("")
+		b.showInboundSettings(userID)
+
+	case data == "pick_vless":
+		if userID != config.Cfg.SuperUserID {
+			ack("❌ Нет доступа")
+			return
+		}
+		ack("")
+		b.showInboundPicker(userID, "vless")
+
+	case data == "pick_vmess":
+		if userID != config.Cfg.SuperUserID {
+			ack("❌ Нет доступа")
+			return
+		}
+		ack("")
+		b.showInboundPicker(userID, "vmess")
+
+	case strings.HasPrefix(data, "set_vless:"):
+		if userID != config.Cfg.SuperUserID {
+			ack("❌ Нет доступа")
+			return
+		}
+		ack("")
+		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "set_vless:"), 10, 64)
+		config.Cfg.VlessInboundID = id
+		if err := config.Save(); err != nil {
+			b.send(userID, "❌ Ошибка сохранения: "+err.Error())
+		} else {
+			b.send(userID, fmt.Sprintf("✅ VLESS inbound изменён на ID: %d", id))
+			b.showInboundSettings(userID)
+		}
+
+	case strings.HasPrefix(data, "set_vmess:"):
+		if userID != config.Cfg.SuperUserID {
+			ack("❌ Нет доступа")
+			return
+		}
+		ack("")
+		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "set_vmess:"), 10, 64)
+		config.Cfg.VmessInboundID = id
+		if err := config.Save(); err != nil {
+			b.send(userID, "❌ Ошибка сохранения: "+err.Error())
+		} else {
+			b.send(userID, fmt.Sprintf("✅ VMess inbound изменён на ID: %d", id))
+			b.showInboundSettings(userID)
+		}
+
 	case data == "change_domain":
 		if userID != config.Cfg.SuperUserID {
 			ack("❌ Нет доступа")
