@@ -1,0 +1,6 @@
+config.json
+db.sqlite
+*.exe
+vpn-bot-linux-*
+*.log
+.qwen/
