@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"golang.org/x/net/proxy"
@@ -149,7 +150,7 @@ func (b *Bot) handleTextState(userID int64, text string) {
 func buildHTTPClient() (*http.Client, error) {
 	if config.Cfg.ProxyURL == "" {
 		log.Println("ℹ️ Прокси не используется")
-		return &http.Client{}, nil
+		return &http.Client{Timeout: 30 * time.Second}, nil
 	}
 	parsed, err := url.Parse(config.Cfg.ProxyURL)
 	if err != nil {
@@ -162,6 +163,7 @@ func buildHTTPClient() (*http.Client, error) {
 		}
 		log.Printf("🔗 Используем SOCKS5 прокси: %s", config.Cfg.ProxyURL)
 		return &http.Client{
+			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				Dial:            dialer.Dial,
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -170,6 +172,7 @@ func buildHTTPClient() (*http.Client, error) {
 	}
 	log.Printf("🔗 Используем %s прокси: %s", parsed.Scheme, config.Cfg.ProxyURL)
 	return &http.Client{
+		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			Proxy:           http.ProxyURL(parsed),
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
