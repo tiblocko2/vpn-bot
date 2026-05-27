@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/cookiejar"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,7 +23,7 @@ var client *http.Client
 func InitHTTPClient() {
 	jar, _ := cookiejar.New(nil)
 	client = &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout: 90 * time.Second,
 		Jar:     jar,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -30,14 +31,73 @@ func InitHTTPClient() {
 	}
 }
 
+// ensureAuth authenticates if no Bearer token is configured.
+// With a Bearer token the HTTP client sends Authorization header on every request
+// and no session/CSRF management is needed.
+func ensureAuth() error {
+	if config.Cfg.PanelAPIToken != "" {
+		return nil // Bearer token — no login needed
+	}
+	return Login()
+}
+
+// addAuthHeaders sets the required auth and request-type headers.
+func addAuthHeaders(req *http.Request) {
+	if config.Cfg.PanelAPIToken != "" {
+		req.Header.Set("Authorization", "Bearer "+config.Cfg.PanelAPIToken)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+}
+
+// fetchCSRFToken loads the login page and extracts the CSRF meta tag value.
+// 3X-UI ≥ v3.1.0 requires the token on every POST when using cookie auth.
+func fetchCSRFToken() (string, error) {
+	req, err := http.NewRequest("GET", config.Cfg.PanelURL+"/login", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	// <meta name="csrf-token" content="TOKEN">
+	re := regexp.MustCompile(`<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']`)
+	m := re.FindSubmatch(body)
+	if len(m) < 2 {
+		return "", fmt.Errorf("CSRF токен не найден на странице логина")
+	}
+	return string(m[1]), nil
+}
+
+// Login performs cookie-based login with automatic CSRF token extraction.
+// The extracted token is sent in the X-CSRF-Token header as required by 3X-UI v3.1.0+.
 func Login() error {
+	// Flush old cookies so we get a fresh session each call.
+	jar, _ := cookiejar.New(nil)
+	client.Jar = jar
+
+	// Step 1: fetch login page to get CSRF token (ignore errors — older panels may not need it).
+	csrfToken, err := fetchCSRFToken()
+	if err != nil {
+		log.Printf("ℹ️ CSRF токен не получен (%v), продолжаем без него", err)
+	}
+
+	// Step 2: POST credentials.
 	data := fmt.Sprintf("username=%s&password=%s", config.Cfg.PanelUsername, config.Cfg.PanelPassword)
 	req, _ := http.NewRequest("POST", config.Cfg.PanelURL+"/login", strings.NewReader(data))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	// Новые версии 3X-UI требуют этот заголовок для возврата JSON вместо HTML-редиректа
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Referer", config.Cfg.PanelURL+"/")
+	if csrfToken != "" {
+		req.Header.Set("X-CSRF-Token", csrfToken)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -47,7 +107,7 @@ func Login() error {
 
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) == 0 {
-		return fmt.Errorf("пустой ответ от панели (HTTP %d) — возможно, изменился Web Base Path в настройках 3X-UI", resp.StatusCode)
+		return fmt.Errorf("пустой ответ от панели (HTTP %d) — проверьте Web Base Path и доступность панели", resp.StatusCode)
 	}
 
 	var result map[string]interface{}
@@ -62,27 +122,26 @@ func Login() error {
 	return nil
 }
 
-func getRequest(method string) ([]byte, error) {
-	req, err := http.NewRequest("GET", config.Cfg.PanelURL+method, nil)
+func getRequest(path string) ([]byte, error) {
+	req, err := http.NewRequest("GET", config.Cfg.PanelURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	// cookies управляются автоматически через cookiejar клиента
+	addAuthHeaders(req)
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP ошибка (%s): %v", method, err)
+		return nil, fmt.Errorf("HTTP ошибка (%s): %v", path, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) == 0 {
-		return nil, fmt.Errorf("пустой ответ от панели (status: %d, метод: %s)", resp.StatusCode, method)
+		return nil, fmt.Errorf("пустой ответ от панели (status: %d, метод: %s)", resp.StatusCode, path)
 	}
 	return body, nil
 }
 
-func postRequest(method string, payload interface{}) error {
+func postRequest(path string, payload interface{}) error {
 	bodyBytes := []byte("{}")
 	if payload != nil {
 		var err error
@@ -92,24 +151,22 @@ func postRequest(method string, payload interface{}) error {
 		}
 	}
 
-	req, err := http.NewRequest("POST", config.Cfg.PanelURL+method, bytes.NewBuffer(bodyBytes))
+	req, err := http.NewRequest("POST", config.Cfg.PanelURL+path, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	// cookies управляются автоматически через cookiejar клиента
+	addAuthHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("HTTP ошибка (%s): %v", method, err)
+		return fmt.Errorf("HTTP ошибка (%s): %v", path, err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) == 0 {
-		return fmt.Errorf("пустой ответ от панели (status: %d, метод: %s)", resp.StatusCode, method)
+		return fmt.Errorf("пустой ответ от панели (status: %d, метод: %s)", resp.StatusCode, path)
 	}
 
 	var result map[string]interface{}
@@ -122,33 +179,46 @@ func postRequest(method string, payload interface{}) error {
 	return nil
 }
 
-func addClientToInbound(inboundID int64, email, comment, subID, uuid string) error {
-	settingsJSON, _ := json.Marshal(map[string]interface{}{
-		"clients": []map[string]interface{}{
-			{
-				"id": uuid, "alterId": 0, "email": email,
-				"comment": comment, "subId": subID,
-				"enable": true, "totalGB": 0, "expiryTime": 0,
-				"flow": "", "tgId": "", "limitIp": 0,
-			},
+// addClientToPanel calls POST /panel/api/clients/add (3X-UI ≥ v3.1.0).
+// In the new API one email is shared across ALL specified inbounds — a single call
+// covers every inbound instead of the old per-inbound addClient loop.
+func addClientToPanel(inboundIDs []int64, email, comment, subID, uuid string) error {
+	return postRequest("/panel/api/clients/add", map[string]interface{}{
+		"client": map[string]interface{}{
+			"id":         uuid,
+			"alterId":    0,
+			"email":      email,
+			"comment":    comment,
+			"subId":      subID,
+			"enable":     true,
+			"totalGB":    0,
+			"expiryTime": 0,
+			"flow":       "",
+			"tgId":       0,
+			"limitIp":    0,
 		},
-	})
-	return postRequest("/panel/api/inbounds/addClient", map[string]interface{}{
-		"id":       inboundID,
-		"settings": string(settingsJSON),
+		"inboundIds": inboundIDs,
 	})
 }
 
-func deleteClientByEmail(inboundID int64, email string) error {
+// deleteClientByEmail calls POST /panel/api/clients/del/:email (3X-UI ≥ v3.1.0).
+func deleteClientByEmail(email string) error {
+	return postRequest("/panel/api/clients/del/"+email, nil)
+}
+
+// attachClientToInbound adds an existing client to additional inbounds without
+// creating a new identity: POST /panel/api/clients/:email/attach (3X-UI ≥ v3.1.0).
+func attachClientToInbound(email string, inboundIDs []int64) error {
 	return postRequest(
-		fmt.Sprintf("/panel/api/inbounds/%d/delClientByEmail/%s", inboundID, email),
-		nil,
+		"/panel/api/clients/"+email+"/attach",
+		map[string]interface{}{"inboundIds": inboundIDs},
 	)
 }
 
-// AddClient adds the client to all configured inbounds, all sharing one subId and UUID.
+// AddClient creates a brand-new client and registers it in every configured inbound.
+// 3X-UI v3.1.0+ uses a single email shared across all inbounds.
 func AddClient(name string) (string, error) {
-	if err := Login(); err != nil {
+	if err := ensureAuth(); err != nil {
 		return "", fmt.Errorf("ошибка авторизации: %v", err)
 	}
 
@@ -159,19 +229,22 @@ func AddClient(name string) (string, error) {
 
 	subscription := normalizeName(name)
 	uuid := generateUUID()
-	emails := make(map[int64]string, len(inbounds))
+	email := randomEmail() // one email shared across all inbounds
 
+	inboundIDs := make([]int64, len(inbounds))
 	for i, ib := range inbounds {
-		email := randomEmail()
-		if err := addClientToInbound(ib.ID, email, name, subscription, uuid); err != nil {
-			return "", fmt.Errorf("ошибка добавления в inbound %d (%s): %v", ib.ID, ib.Label, err)
-		}
-		emails[ib.ID] = email
-		if i < len(inbounds)-1 {
-			time.Sleep(200 * time.Millisecond)
-		}
+		inboundIDs[i] = ib.ID
 	}
 
+	if err := addClientToPanel(inboundIDs, email, name, subscription, uuid); err != nil {
+		return "", fmt.Errorf("ошибка добавления клиента: %v", err)
+	}
+
+	// Persist the same email for every inbound.
+	emails := make(map[int64]string, len(inbounds))
+	for _, ib := range inbounds {
+		emails[ib.ID] = email
+	}
 	if err := db.SaveClient(name, subscription, uuid, emails); err != nil {
 		return "", fmt.Errorf("ошибка сохранения в БД: %v", err)
 	}
@@ -179,73 +252,72 @@ func AddClient(name string) (string, error) {
 	return fmt.Sprintf("%s/%s", config.Cfg.SubDomain, subscription), nil
 }
 
-// DeleteClient removes a client from every inbound it has an email in,
-// then deletes the database record.
+// DeleteClient removes a client from every inbound and from the database.
 func DeleteClient(id int64) (string, error) {
 	emails, name, err := db.GetClientEmails(id)
 	if err != nil {
 		return "", fmt.Errorf("клиент не найден в базе")
 	}
 
-	if err := Login(); err != nil {
+	if err := ensureAuth(); err != nil {
 		return name, fmt.Errorf("ошибка авторизации: %v", err)
 	}
 
-	first := true
-	for inboundID, email := range emails {
-		if !first {
-			time.Sleep(200 * time.Millisecond)
+	// Deduplicate: in v3.1.0+ all inbounds share one email, but old records may
+	// have stored different emails per inbound — delete each unique email once.
+	seen := make(map[string]bool)
+	for _, email := range emails {
+		if seen[email] {
+			continue
 		}
-		if err := deleteClientByEmail(inboundID, email); err != nil {
-			log.Printf("⚠️ Ошибка удаления из inbound %d: %v", inboundID, err)
+		seen[email] = true
+		if err := deleteClientByEmail(email); err != nil {
+			log.Printf("⚠️ Ошибка удаления клиента '%s' (email=%s): %v", name, email, err)
 		}
-		first = false
 	}
 
 	return name, db.DeleteClient(id)
 }
 
-// AddExistingClientToInbound adds an existing client to a new inbound,
-// reusing their subscription and UUID.
+// AddExistingClientToInbound attaches an existing client to a new inbound,
+// reusing their identity (email / UUID / subscription).
 func AddExistingClientToInbound(clientID int64, targetInboundID int64) error {
 	details, err := db.GetClientDetails(clientID)
 	if err != nil {
 		return err
 	}
 
-	if err := Login(); err != nil {
+	if err := ensureAuth(); err != nil {
 		return fmt.Errorf("ошибка авторизации: %v", err)
 	}
 
-	uuid := details.UUID
-	if uuid == "" {
-		// Try to find UUID from an existing inbound via panel API.
-		for ibID := range details.Emails {
-			clients, err := getInboundClients(ibID)
-			if err != nil {
-				continue
-			}
-			for _, c := range clients {
-				if c.SubID == details.Subscription && c.UUID != "" {
-					uuid = c.UUID
-					db.SetClientUUID(clientID, uuid)
-					break
-				}
-			}
-			if uuid != "" {
-				break
-			}
+	// Pick the first known email (same across all inbounds in v3.1.0+).
+	var email string
+	for _, e := range details.Emails {
+		if e != "" {
+			email = e
+			break
 		}
 	}
-	if uuid == "" {
-		uuid = generateUUID()
-		db.SetClientUUID(clientID, uuid)
+
+	if email != "" {
+		// Attach existing client identity to the new inbound.
+		if err := attachClientToInbound(email, []int64{targetInboundID}); err != nil {
+			return fmt.Errorf("ошибка прикрепления к inbound %d: %v", targetInboundID, err)
+		}
+	} else {
+		// No existing email — create a fresh entry.
+		email = randomEmail()
+		uuid := details.UUID
+		if uuid == "" {
+			uuid = generateUUID()
+			db.SetClientUUID(clientID, uuid)
+		}
+		if err := addClientToPanel([]int64{targetInboundID}, email, details.Comment, details.Subscription, uuid); err != nil {
+			return fmt.Errorf("ошибка добавления в inbound %d: %v", targetInboundID, err)
+		}
 	}
 
-	email := randomEmail()
-	if err := addClientToInbound(targetInboundID, email, details.Comment, details.Subscription, uuid); err != nil {
-		return fmt.Errorf("ошибка добавления в inbound %d: %v", targetInboundID, err)
-	}
 	return db.AddClientEmail(clientID, targetInboundID, email)
 }
 
@@ -261,7 +333,7 @@ type PanelInbound struct {
 
 // GetInboundList fetches all inbounds from the panel.
 func GetInboundList() ([]PanelInbound, error) {
-	if err := Login(); err != nil {
+	if err := ensureAuth(); err != nil {
 		return nil, fmt.Errorf("ошибка авторизации: %v", err)
 	}
 	body, err := getRequest("/panel/api/inbounds/list")
@@ -283,7 +355,7 @@ func GetInboundList() ([]PanelInbound, error) {
 	if !result.Success {
 		return nil, fmt.Errorf("API вернул ошибку при получении inbound")
 	}
-	var out []PanelInbound
+	out := make([]PanelInbound, 0, len(result.Obj))
 	for _, o := range result.Obj {
 		out = append(out, PanelInbound{ID: o.ID, Remark: o.Remark, Protocol: o.Protocol, Enable: o.Enable})
 	}
@@ -347,18 +419,20 @@ func getInboundClients(inboundID int64) ([]inboundClient, error) {
 }
 
 // ImportClientsFromPanel scans the specified inbounds and imports clients into the bot DB.
+// In 3X-UI v3.1.0+ one email is shared across all inbounds, so deduplication is by subId.
 func ImportClientsFromPanel(inboundIDs []int64) (ImportResult, error) {
 	if len(inboundIDs) == 0 {
 		return ImportResult{}, fmt.Errorf("не выбраны inbound для импорта")
 	}
-	if err := Login(); err != nil {
+	if err := ensureAuth(); err != nil {
 		return ImportResult{}, fmt.Errorf("ошибка авторизации: %v", err)
 	}
 
 	type entry struct {
 		comment string
 		uuid    string
-		emails  map[int64]string
+		email   string            // shared email (v3.1.0+)
+		emails  map[int64]string  // per-inbound map for DB
 	}
 	bySubID := make(map[string]*entry)
 
@@ -379,6 +453,9 @@ func ImportClientsFromPanel(inboundIDs []int64) (ImportResult, error) {
 			}
 			if e.uuid == "" {
 				e.uuid = c.UUID
+			}
+			if e.email == "" {
+				e.email = c.Email
 			}
 		}
 	}

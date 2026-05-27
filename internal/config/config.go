@@ -21,6 +21,10 @@ type Config struct {
 	Inbounds      []InboundConfig `json:"inbounds"`
 	DBPath        string          `json:"db_path"`
 
+	// PanelAPIToken enables Bearer-token auth (Settings → Security → API Tokens).
+	// When set, cookie-based login is skipped entirely (no CSRF issues).
+	PanelAPIToken string `json:"panel_api_token,omitempty"`
+
 	// Legacy fields — kept only for one-time migration from v1.0/v1.1 configs.
 	// After migration these are cleared and removed from config.json.
 	VlessInboundID int64 `json:"vless_inbound_id,omitempty"`
