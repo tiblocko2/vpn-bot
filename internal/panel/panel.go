@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"strings"
 	"time"
 
@@ -16,14 +17,13 @@ import (
 	"vpn-bot/internal/db"
 )
 
-var (
-	client  *http.Client
-	cookies []*http.Cookie
-)
+var client *http.Client
 
 func InitHTTPClient() {
+	jar, _ := cookiejar.New(nil)
 	client = &http.Client{
 		Timeout: 15 * time.Second,
+		Jar:     jar,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
@@ -35,6 +35,9 @@ func Login() error {
 	req, _ := http.NewRequest("POST", config.Cfg.PanelURL+"/login", strings.NewReader(data))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	// Новые версии 3X-UI требуют этот заголовок для возврата JSON вместо HTML-редиректа
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Referer", config.Cfg.PanelURL+"/")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -42,17 +45,20 @@ func Login() error {
 	}
 	defer resp.Body.Close()
 
-	cookies = resp.Cookies()
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		return fmt.Errorf("пустой ответ от панели (HTTP %d) — возможно, изменился Web Base Path в настройках 3X-UI", resp.StatusCode)
+	}
 
 	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return err
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("ответ не является JSON (HTTP %d): %.300s", resp.StatusCode, string(body))
 	}
 	if success, ok := result["success"].(bool); !success || !ok {
 		return fmt.Errorf("ошибка авторизации: %v", result["msg"])
 	}
 
-	log.Printf("✅ Авторизация в панели успешна (cookies: %d)", len(cookies))
+	log.Printf("✅ Авторизация в панели успешна")
 	return nil
 }
 
@@ -62,9 +68,8 @@ func getRequest(method string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// cookies управляются автоматически через cookiejar клиента
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP ошибка (%s): %v", method, err)
@@ -93,9 +98,8 @@ func postRequest(method string, payload interface{}) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// cookies управляются автоматически через cookiejar клиента
 
 	resp, err := client.Do(req)
 	if err != nil {
