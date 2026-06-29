@@ -21,14 +21,14 @@ type Config struct {
 	Inbounds      []InboundConfig `json:"inbounds"`
 	DBPath        string          `json:"db_path"`
 
+	// XUIDBDSN is the PostgreSQL DSN of the 3X-UI database (v3.4.1+).
+	// The bot reads clients/inbounds straight from it — it is the source of truth.
+	// Example: postgres://user:pass@127.0.0.1:5432/xui?sslmode=disable
+	XUIDBDSN string `json:"xui_db_dsn"`
+
 	// PanelAPIToken enables Bearer-token auth (Settings → Security → API Tokens).
 	// When set, cookie-based login is skipped entirely (no CSRF issues).
 	PanelAPIToken string `json:"panel_api_token,omitempty"`
-
-	// Legacy fields — kept only for one-time migration from v1.0/v1.1 configs.
-	// After migration these are cleared and removed from config.json.
-	VlessInboundID int64 `json:"vless_inbound_id,omitempty"`
-	VmessInboundID int64 `json:"vmess_inbound_id,omitempty"`
 }
 
 var Cfg *Config
@@ -43,16 +43,6 @@ func Load(path string) error {
 	c := &Config{}
 	if err := json.Unmarshal(data, c); err != nil {
 		return err
-	}
-	// Auto-migrate from old two-inbound format. Legacy IDs are kept in the
-	// struct so main.go can use them for the one-time DB migration.
-	if len(c.Inbounds) == 0 {
-		if c.VlessInboundID != 0 {
-			c.Inbounds = append(c.Inbounds, InboundConfig{ID: c.VlessInboundID, Label: "VLESS"})
-		}
-		if c.VmessInboundID != 0 {
-			c.Inbounds = append(c.Inbounds, InboundConfig{ID: c.VmessInboundID, Label: "VMess"})
-		}
 	}
 	Cfg = c
 	return nil

@@ -15,13 +15,14 @@ import (
 	"vpn-bot/internal/config"
 	"vpn-bot/internal/db"
 	"vpn-bot/internal/panel"
+	"vpn-bot/internal/xui"
 )
 
 // Bot wraps the Telegram API client and holds per-user conversation state.
 type Bot struct {
-	api             *tgbotapi.BotAPI
-	userState       map[int64]string
-	importSelection map[int64]map[int64]bool // userID → inboundID → selected
+	api         *tgbotapi.BotAPI
+	userState   map[int64]string
+	searchQuery map[int64]string // userID → active client-list search filter
 }
 
 func New() (*Bot, error) {
@@ -36,9 +37,9 @@ func New() (*Bot, error) {
 	api.Debug = false
 	log.Printf("✅ Бот запущен, username: @%s", api.Self.UserName)
 	return &Bot{
-		api:             api,
-		userState:       make(map[int64]string),
-		importSelection: make(map[int64]map[int64]bool),
+		api:         api,
+		userState:   make(map[int64]string),
+		searchQuery: make(map[int64]string),
 	}, nil
 }
 
@@ -91,13 +92,47 @@ func (b *Bot) handleMessage(update *tgbotapi.Update) {
 
 func (b *Bot) handleTextState(userID int64, text string) {
 	switch b.userState[userID] {
+	case "waiting_search":
+		delete(b.userState, userID)
+		query := strings.TrimSpace(text)
+		if query == "" {
+			delete(b.searchQuery, userID)
+		} else {
+			b.searchQuery[userID] = query
+		}
+		b.showClientList(userID, 0, 0)
+
+	case "waiting_page":
+		delete(b.userState, userID)
+		var page int
+		if _, err := fmt.Sscan(strings.TrimSpace(text), &page); err != nil || page < 1 {
+			b.send(userID, "❌ Введите номер страницы (число).")
+			return
+		}
+		_, total, err := xui.GetClientsPage(b.searchQuery[userID], 0, xui.ClientsPerPage)
+		if err != nil {
+			b.send(userID, "❌ Ошибка получения списка клиентов")
+			return
+		}
+		totalPages := (total + xui.ClientsPerPage - 1) / xui.ClientsPerPage
+		if totalPages < 1 {
+			totalPages = 1
+		}
+		if page > totalPages {
+			page = totalPages
+		}
+		b.showClientList(userID, page-1, 0)
+
 	case "waiting_name":
 		name := strings.TrimSpace(text)
 		if name == "" {
 			b.send(userID, "❌ Имя не может быть пустым. Введите Фамилию и Имя.")
 			return
 		}
-		if db.ClientExists(name) {
+		if exists, err := xui.ClientExistsByComment(name); err != nil {
+			b.send(userID, "❌ Ошибка проверки клиента: "+err.Error())
+			return
+		} else if exists {
 			b.send(userID, fmt.Sprintf("❌ Клиент '%s' уже существует.", name))
 			return
 		}

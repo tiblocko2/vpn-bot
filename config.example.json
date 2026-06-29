@@ -1,12 +1,16 @@
 {
   "bot_token": "YOUR_BOT_TOKEN_HERE",
   "super_user_id": 123456789,
-  "panel_url": "https://your-server.example.com:808",
+  "panel_url": "https://your-server.example.com:808/aMbLDhXCy2VESBLBQE",
   "panel_username": "admin",
   "panel_password": "your_panel_password",
+  "panel_api_token": "",
+  "xui_db_dsn": "postgres://user:pass@127.0.0.1:5432/xui?sslmode=disable",
   "sub_domain": "https://your-server.example.com:2096/sub",
   "proxy_url": "",
-  "vless_inbound_id": 1,
-  "vmess_inbound_id": 5,
+  "inbounds": [
+    { "id": 1, "label": "VLESS" },
+    { "id": 5, "label": "VMess" }
+  ],
   "db_path": "db.sqlite"
 }

@@ -7,6 +7,7 @@ import (
 	"vpn-bot/internal/config"
 	"vpn-bot/internal/db"
 	"vpn-bot/internal/panel"
+	"vpn-bot/internal/xui"
 )
 
 func main() {
@@ -14,9 +15,12 @@ func main() {
 		log.Fatalf("❌ Ошибка загрузки конфига: %v\nСоздайте config.json на основе config.example.json", err)
 	}
 
-	log.Println("⏳ Инициализация БД...")
+	log.Println("⏳ Инициализация локальной БД (операторы)...")
 	db.Init()
-	db.MigrateEmailsFromOldSchema(config.Cfg.VlessInboundID, config.Cfg.VmessInboundID)
+	log.Println("⏳ Подключение к PostgreSQL 3X-UI...")
+	if err := xui.Init(config.Cfg.XUIDBDSN); err != nil {
+		log.Fatalf("❌ %v", err)
+	}
 	log.Println("⏳ Инициализация панели...")
 	panel.InitHTTPClient()
 

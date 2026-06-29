@@ -66,6 +66,12 @@ info "💡 API Token (рекомендуется для 3X-UI v3.1.0+)"
 info "   Получить: 3X-UI → Settings → Security → API Tokens → Create"
 read -p "   API Token панели [Enter — пропустить, авторизация по паролю]: " PANEL_API_TOKEN
 
+section "База данных 3X-UI (PostgreSQL)"
+info "3X-UI v3.4.1+ хранит клиентов в PostgreSQL. Бот читает их напрямую."
+info "DSN можно увидеть в логе панели при старте."
+read -p "PostgreSQL DSN [postgres://user:pass@127.0.0.1:5432/xui?sslmode=disable]: " XUI_DB_DSN
+[ -z "$XUI_DB_DSN" ] && error "PostgreSQL DSN не может быть пустым"
+
 section "Inbound'ы"
 info "Введите ID и название каждого inbound'а."
 info "Нажмите Enter без ID — чтобы закончить."
@@ -114,6 +120,7 @@ cat > "$INSTALL_DIR/config.json" <<CONFIGEOF
   "panel_username": "$PANEL_USERNAME",
   "panel_password": "$PANEL_PASSWORD",
   "panel_api_token": "$PANEL_API_TOKEN",
+  "xui_db_dsn": "$XUI_DB_DSN",
   "sub_domain": "$SUB_DOMAIN",
   "proxy_url": "$PROXY_URL",
   "inbounds": [$INBOUNDS_JSON

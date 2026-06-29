@@ -10,6 +10,7 @@ import (
 	"vpn-bot/internal/config"
 	"vpn-bot/internal/db"
 	"vpn-bot/internal/panel"
+	"vpn-bot/internal/xui"
 )
 
 func (b *Bot) handleCallback(update *tgbotapi.Update) {
@@ -35,12 +36,28 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 
 	case data == "client_list_new":
 		ack("")
+		delete(b.searchQuery, userID)
 		b.showClientList(userID, 0, 0)
 
 	case strings.HasPrefix(data, "client_list:"):
 		ack("")
 		page, _ := strconv.Atoi(strings.TrimPrefix(data, "client_list:"))
 		b.showClientList(userID, page, msgID)
+
+	case data == "client_search":
+		ack("")
+		b.userState[userID] = "waiting_search"
+		b.send(userID, "🔍 Введите текст для поиска (имя, email или subId):")
+
+	case data == "client_search_reset":
+		ack("")
+		delete(b.searchQuery, userID)
+		b.showClientList(userID, 0, msgID)
+
+	case data == "client_page_input":
+		ack("")
+		b.userState[userID] = "waiting_page"
+		b.send(userID, "🔢 Введите номер страницы:")
 
 	case strings.HasPrefix(data, "client_detail:"):
 		ack("")
@@ -55,8 +72,13 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 		}
 		clientID, _ := strconv.ParseInt(parts[0], 10, 64)
 		inboundID, _ := strconv.ParseInt(parts[1], 10, 64)
+		cl, err := xui.GetClientByID(clientID)
+		if err != nil {
+			b.send(userID, "❌ Клиент не найден")
+			return
+		}
 		b.send(userID, "⏳ Добавляю в inbound...")
-		if err := panel.AddExistingClientToInbound(clientID, inboundID); err != nil {
+		if err := panel.AttachClientToInbound(cl.Email, []int64{inboundID}); err != nil {
 			b.send(userID, "❌ Ошибка: "+err.Error())
 		} else {
 			b.showClientDetail(userID, clientID, 0)
@@ -72,8 +94,13 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 	case strings.HasPrefix(data, "del_confirm_yes:"):
 		ack("")
 		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "del_confirm_yes:"), 10, 64)
-		name, err := panel.DeleteClient(id)
+		cl, err := xui.GetClientByID(id)
 		if err != nil {
+			b.send(userID, "❌ Клиент не найден")
+			return
+		}
+		name := cl.Comment
+		if err := panel.DeleteClient(cl.Email); err != nil {
 			b.send(userID, "❌ Ошибка: "+err.Error())
 		} else {
 			b.sendOrEdit(userID, msgID, fmt.Sprintf("✅ Пользователь '%s' удалён", name), "",
@@ -104,47 +131,6 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 			b.send(userID, fmt.Sprintf("✅ Оператор %d удалён", opID))
 		}
 
-	// --- import flow ---
-
-	case data == "import_panel":
-		ack("")
-		delete(b.importSelection, userID)
-		b.showImportSelection(userID)
-
-	case strings.HasPrefix(data, "import_toggle:"):
-		ack("")
-		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "import_toggle:"), 10, 64)
-		if b.importSelection[userID] == nil {
-			b.importSelection[userID] = make(map[int64]bool)
-		}
-		b.importSelection[userID][id] = !b.importSelection[userID][id]
-		b.showImportSelection(userID)
-
-	case data == "import_run":
-		ack("")
-		sel := b.importSelection[userID]
-		var ids []int64
-		for id, on := range sel {
-			if on {
-				ids = append(ids, id)
-			}
-		}
-		delete(b.importSelection, userID)
-		if len(ids) == 0 {
-			b.send(userID, "❌ Не выбрано ни одного inbound")
-			return
-		}
-		b.send(userID, "⏳ Импортирую клиентов из 3X-UI...")
-		res, err := panel.ImportClientsFromPanel(ids)
-		if err != nil {
-			b.send(userID, "❌ Ошибка импорта: "+err.Error())
-		} else {
-			b.send(userID, fmt.Sprintf(
-				"✅ Импорт завершён:\n• Добавлено: %d\n• Уже существуют: %d",
-				res.Imported, res.Skipped,
-			))
-		}
-
 	// --- inbound management (superuser only) ---
 
 	case data == "inbound_settings":
@@ -171,7 +157,7 @@ func (b *Bot) handleCallback(update *tgbotapi.Update) {
 		ack("")
 		id, _ := strconv.ParseInt(strings.TrimPrefix(data, "ib_add_pick:"), 10, 64)
 		label := fmt.Sprintf("Inbound %d", id)
-		if list, err := panel.GetInboundList(); err == nil {
+		if list, err := xui.GetInboundList(); err == nil {
 			for _, ib := range list {
 				if ib.ID == id {
 					label = ib.Remark
